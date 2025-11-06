@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io  # <-- para crear los .xlsx en memoria
 
 # Intentamos usar Altair para gráficos; si no está disponible, usamos los gráficos nativos de Streamlit
 try:
@@ -49,12 +50,26 @@ def load_data(file) -> pd.DataFrame:
     df = pd.read_excel(file)
     df = clean_columns(df)
 
-    # Conversión de fechas (si existen)
+    # ----------------------------------------
+    # Normalización de fechas (si existen)
+    # ----------------------------------------
     for col in ["FECHA ATENCIÓN", "FECHA REGISTRO", "FECHA NACIMIENTO", "FECHA PROGRAMADA"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # Separar ID y nombre del profesional
+    # ----------------------------------------
+    # Cédula del paciente (IDENTIFICACION)
+    # ----------------------------------------
+    if "IDENTIFICACION" in df.columns:
+        df["CEDULA_PACIENTE"] = df["IDENTIFICACION"].astype(str).str.strip()
+    elif "NUMERO PACIENTE" in df.columns:
+        df["CEDULA_PACIENTE"] = df["NUMERO PACIENTE"].astype(str).str.strip()
+    else:
+        df["CEDULA_PACIENTE"] = np.nan
+
+    # ----------------------------------------
+    # Profesional (separar ID y nombre)
+    # ----------------------------------------
     if "PROFESIONAL ATIENDE" in df.columns:
         prof_raw = df["PROFESIONAL ATIENDE"].astype(str).str.split("-", n=1, expand=True)
         df["ID_PROFESIONAL"] = prof_raw[0].str.strip().replace({"nan": np.nan})
@@ -66,8 +81,16 @@ def load_data(file) -> pd.DataFrame:
         df["ID_PROFESIONAL"] = np.nan
         df["NOMBRE_PROFESIONAL"] = np.nan
 
+    # ----------------------------------------
     # Clasificación de entorno (PPL / Cárceles vs comunidad)
-    dir_col = "DIRECCION" if "DIRECCION" in df.columns else None
+    # ----------------------------------------
+    # Usamos DIRECCION o DIRECION según lo que venga
+    dir_col = None
+    if "DIRECCION" in df.columns:
+        dir_col = "DIRECCION"
+    elif "DIRECION" in df.columns:
+        dir_col = "DIRECION"
+
     programa_col = "PROGRAMA" if "PROGRAMA" in df.columns else None
 
     direccion_up = df[dir_col].astype(str).str.upper() if dir_col else pd.Series("", index=df.index)
@@ -105,7 +128,6 @@ def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
             min_value=min_date.date(),
             max_value=max_date.date(),
         )
-        # Convertimos a datetime para filtrar
         mask_fecha = (df["FECHA ATENCIÓN"].dt.date >= fecha_ini) & (df["FECHA ATENCIÓN"].dt.date <= fecha_fin)
         df = df[mask_fecha]
 
@@ -162,7 +184,7 @@ def mostrar_kpis(df: pd.DataFrame):
 
     total_registros = len(df)
     historias_unicas = df["ID ATENCION"].nunique() if "ID ATENCION" in df.columns else total_registros
-    pacientes_unicos = df["NUMERO PACIENTE"].nunique() if "NUMERO PACIENTE" in df.columns else np.nan
+    pacientes_unicos = df["CEDULA_PACIENTE"].nunique() if "CEDULA_PACIENTE" in df.columns else np.nan
     profesionales_activos = df["ID_PROFESIONAL"].nunique() if "ID_PROFESIONAL" in df.columns else np.nan
 
     historias_por_paciente = None
@@ -172,7 +194,7 @@ def mostrar_kpis(df: pd.DataFrame):
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Historias únicas (ID ATENCIÓN)", f"{historias_unicas:,}")
     col2.metric(
-        "Pacientes únicos valorados",
+        "Cédulas únicas valoradas",
         f"{pacientes_unicos:,}" if not np.isnan(pacientes_unicos) else "N/D"
     )
     col3.metric(
@@ -181,9 +203,9 @@ def mostrar_kpis(df: pd.DataFrame):
     )
 
     if historias_por_paciente is not None:
-        col4.metric("Historias por paciente", f"{historias_por_paciente:.2f}")
+        col4.metric("Historias por cédula", f"{historias_por_paciente:.2f}")
     else:
-        col4.metric("Historias por paciente", "N/D")
+        col4.metric("Historias por cédula", "N/D")
 
     # Información de calidad de datos: duplicados de ID ATENCION
     if "ID ATENCION" in df.columns:
@@ -229,6 +251,15 @@ def chart_bar_with_labels(data: pd.DataFrame, x: str, y: str, color: str = None,
         st.bar_chart(data.set_index(y)[x])
 
 
+def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Datos") -> bytes:
+    """Convierte un DataFrame en un archivo Excel en memoria (bytes)."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output.getvalue()
+
+
 def vista_por_profesional(df: pd.DataFrame):
     """Vista de productividad por profesional."""
     if df.empty:
@@ -256,21 +287,19 @@ def vista_por_profesional(df: pd.DataFrame):
             if "ID ATENCION" in df.columns
             else ("NOMBRE PACIENTE", "size"),
             registros=("ID ATENCION", "size"),
-            pacientes_unicos=("NUMERO PACIENTE", "nunique")
-            if "NUMERO PACIENTE" in df.columns
+            pacientes_unicos=("CEDULA_PACIENTE", "nunique")
+            if "CEDULA_PACIENTE" in df.columns
             else ("NOMBRE PACIENTE", "nunique"),
         )
         .reset_index()
     )
 
-    # Evitamos división por cero
     resumen["hist_x_paciente"] = np.where(
         resumen["pacientes_unicos"] > 0,
         resumen["historias"] / resumen["pacientes_unicos"],
         np.nan,
     )
 
-    # Ranking top N
     top_n = st.slider(
         "Número de profesionales a mostrar (Top N por historias)",
         5, 50, 20
@@ -289,12 +318,13 @@ def vista_por_profesional(df: pd.DataFrame):
     with st.expander("Ver tabla detallada de productividad por profesional"):
         st.dataframe(resumen.sort_values("historias", ascending=False), use_container_width=True)
 
-        csv = resumen.to_csv(index=False).encode("utf-8-sig")
+        excel_bytes = df_to_excel_bytes(resumen.sort_values("historias", ascending=False),
+                                        sheet_name="Profesionales")
         st.download_button(
-            "⬇️ Descargar resumen por profesional (CSV)",
-            data=csv,
-            file_name="resumen_productividad_profesional.csv",
-            mime="text/csv",
+            "⬇️ Descargar resumen por profesional (XLSX)",
+            data=excel_bytes,
+            file_name="resumen_productividad_profesional.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 
@@ -319,8 +349,8 @@ def vista_por_especialidad(df: pd.DataFrame):
             if "ID ATENCION" in df.columns
             else ("NOMBRE PACIENTE", "size"),
             registros=("ID ATENCION", "size"),
-            pacientes_unicos=("NUMERO PACIENTE", "nunique")
-            if "NUMERO PACIENTE" in df.columns
+            pacientes_unicos=("CEDULA_PACIENTE", "nunique")
+            if "CEDULA_PACIENTE" in df.columns
             else ("NOMBRE PACIENTE", "nunique"),
             profesionales=("ID_PROFESIONAL", "nunique")
             if "ID_PROFESIONAL" in df.columns
@@ -353,12 +383,14 @@ def vista_por_especialidad(df: pd.DataFrame):
 
     with st.expander("Ver tabla detallada de productividad por especialidad"):
         st.dataframe(resumen.sort_values("historias", ascending=False), use_container_width=True)
-        csv = resumen.to_csv(index=False).encode("utf-8-sig")
+
+        excel_bytes = df_to_excel_bytes(resumen.sort_values("historias", ascending=False),
+                                        sheet_name="Especialidades")
         st.download_button(
-            "⬇️ Descargar resumen por especialidad (CSV)",
-            data=csv,
-            file_name="resumen_productividad_especialidad.csv",
-            mime="text/csv",
+            "⬇️ Descargar resumen por especialidad (XLSX)",
+            data=excel_bytes,
+            file_name="resumen_productividad_especialidad.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 
@@ -382,8 +414,8 @@ def vista_ciudades_carceles(df: pd.DataFrame):
             historias=("ID ATENCION", "nunique")
             if "ID ATENCION" in df.columns
             else ("NOMBRE PACIENTE", "size"),
-            pacientes_unicos=("NUMERO PACIENTE", "nunique")
-            if "NUMERO PACIENTE" in df.columns
+            pacientes_unicos=("CEDULA_PACIENTE", "nunique")
+            if "CEDULA_PACIENTE" in df.columns
             else ("NOMBRE PACIENTE", "nunique"),
             profesionales=("ID_PROFESIONAL", "nunique")
             if "ID_PROFESIONAL" in df.columns
@@ -410,12 +442,14 @@ def vista_ciudades_carceles(df: pd.DataFrame):
 
     with st.expander("Ver tabla detallada por ciudad"):
         st.dataframe(resumen.sort_values("historias", ascending=False), use_container_width=True)
-        csv = resumen.to_csv(index=False).encode("utf-8-sig")
+
+        excel_bytes = df_to_excel_bytes(resumen.sort_values("historias", ascending=False),
+                                        sheet_name="Ciudades")
         st.download_button(
-            "⬇️ Descargar resumen por ciudad (CSV)",
-            data=csv,
-            file_name="resumen_ciudades_entorno.csv",
-            mime="text/csv",
+            "⬇️ Descargar resumen por ciudad (XLSX)",
+            data=excel_bytes,
+            file_name="resumen_ciudades_entorno.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 
@@ -424,12 +458,12 @@ def vista_detalle(df: pd.DataFrame):
     st.subheader("📋 Detalle de historias filtradas")
     st.dataframe(df, use_container_width=True)
 
-    csv = df.to_csv(index=False).encode("utf-8-sig")
+    excel_bytes = df_to_excel_bytes(df, sheet_name="Detalle")
     st.download_button(
-        "⬇️ Descargar detalle de historias filtradas (CSV)",
-        data=csv,
-        file_name="historias_filtradas.csv",
-        mime="text/csv",
+        "⬇️ Descargar detalle de historias filtradas (XLSX)",
+        data=excel_bytes,
+        file_name="historias_filtradas.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
@@ -455,7 +489,6 @@ else:
     st.markdown("### 🔍 Resumen general de productividad")
     mostrar_kpis(df_filt)
 
-    # Tabs de análisis
     tab1, tab2, tab3, tab4 = st.tabs(
         ["👨‍⚕️ Por profesional", "🩺 Por especialidad", "🌎 Ciudades y cárceles", "📋 Detalle de datos"]
     )
