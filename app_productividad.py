@@ -10,7 +10,6 @@ try:
 except ImportError:
     ALT_AVAILABLE = False
 
-
 # -----------------------------
 # Configuración general de la página
 # -----------------------------
@@ -42,7 +41,6 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
         new_cols.append(c2)
     df.columns = new_cols
     return df
-
 
 @st.cache_data
 def load_data(file) -> pd.DataFrame:
@@ -560,8 +558,6 @@ def vista_detalle(df: pd.DataFrame):
         file_name="historias_filtradas.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
-
 # -----------------------------
 # Carga del archivo
 # -----------------------------
@@ -578,13 +574,11 @@ if uploaded_file is None:
         "para comenzar a analizar la productividad."
     )
 else:
+    # OJO: estas líneas van con 4 espacios debajo de `else:`
     df_raw = load_data(uploaded_file)
     df_filt = aplicar_filtros(df_raw)
 
-
-st.markdown("### 🔍 Resumen general\n de productividad")
-
-
+    st.markdown("### 🔍 Resumen general de productividad")
     mostrar_kpis(df_filt)
 
     tab1, tab2, tab3, tab4 = st.tabs(
@@ -602,5 +596,3 @@ st.markdown("### 🔍 Resumen general\n de productividad")
 
     with tab4:
         vista_detalle(df_filt)
-
-
