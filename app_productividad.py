@@ -581,8 +581,9 @@ else:
     df_raw = load_data(uploaded_file)
     df_filt = aplicar_filtros(df_raw)
 
- # Opción 1 (una sola línea)
-st.markdown("### 🔍 Resumen general de productividad")
+
+st.markdown("### 🔍 Resumen general\n de productividad")
+
 
     mostrar_kpis(df_filt)
 
@@ -601,4 +602,5 @@ st.markdown("### 🔍 Resumen general de productividad")
 
     with tab4:
         vista_detalle(df_filt)
+
 
