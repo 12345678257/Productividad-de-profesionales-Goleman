@@ -170,12 +170,22 @@ def load_saved_base() -> pd.DataFrame:
 
 
 def save_base(df: pd.DataFrame):
-    """Guarda la base consolidada a Parquet."""
+    """Guarda la base consolidada a Parquet, forzando columnas object (como EPS) a texto."""
     try:
-        df.to_parquet(PARQUET_PATH, index=False)
+        df2 = df.copy()
+
+        # Forzar todas las columnas tipo object a string (incluye EPS)
+        obj_cols = df2.select_dtypes(include=["object"]).columns
+        for col in obj_cols:
+            df2[col] = df2[col].astype(str)
+
+        # Guardar ya con tipos homogéneos
+        df2.to_parquet(PARQUET_PATH, index=False)
+
         st.success(f"✅ Base consolidada guardada en '{PARQUET_PATH}'.")
     except Exception as e:
         st.error(f"Error guardando base consolidada: {e}")
+
 
 
 def merge_and_dedup(df_base: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame:
@@ -680,3 +690,4 @@ with t5:
     xlsx_det = df_to_excel_bytes({"Detalle_filtrado": df_current})
     st.download_button("⬇️ Descargar detalle filtrado (XLSX)", xlsx_det, file_name="detalle_filtrado.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
