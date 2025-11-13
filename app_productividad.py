@@ -29,6 +29,72 @@ st.caption(
 )
 
 # =========================
+# Helpers de sanitización (clave para evitar Unexpected token 'N' / NaN en JSON)
+# =========================
+def _flatten_cols(cols) -> list:
+    """Convierte columnas (incluido MultiIndex) a una lista de strings, reemplazando NaN por 'NA'."""
+    out = []
+    if isinstance(cols, pd.MultiIndex):
+        for tup in cols.values:
+            parts = [("NA" if (isinstance(x, float) and np.isnan(x)) or x is pd.NA else str(x)) for x in tup]
+            out.append(" | ".join(parts))
+    else:
+        for c in cols:
+            if c is None or (isinstance(c, float) and np.isnan(c)) or c is pd.NA:
+                out.append("NA")
+            else:
+                out.append(str(c))
+    return out
+
+def sanitize_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    """Asegura columnas e índice serializables en JSON/Arrow."""
+    if df is None or len(df) == 0:
+        return df
+
+    df2 = df.copy()
+
+    # Asegurar que columnas sean strings sin NaN
+    df2.columns = _flatten_cols(df2.columns)
+
+    # Resetear índice (MultiIndex o índice con nombre NaN puede romper el schema)
+    if isinstance(df2.index, pd.MultiIndex):
+        df2 = df2.reset_index()
+        df2.columns = _flatten_cols(df2.columns)
+    else:
+        # Si el índice tiene nombre NaN, igual reset
+        try:
+            if df2.index.name is None or (isinstance(df2.index.name, float) and np.isnan(df2.index.name)):
+                df2 = df2.reset_index(drop=True)
+        except Exception:
+            df2 = df2.reset_index(drop=True)
+
+    # Convertir objetos no-serializables (dict/list/tuple/set) a str
+    for c in df2.columns:
+        if df2[c].dtype == "object":
+            df2[c] = df2[c].apply(
+                lambda v: None if (v is pd.NA or (isinstance(v, float) and np.isnan(v))) else v
+            )
+            df2[c] = df2[c].apply(
+                lambda v: str(v) if isinstance(v, (dict, list, tuple, set)) else v
+            )
+
+    return df2
+
+def show_df(df: pd.DataFrame, key: str | None = None):
+    """Wrapper para mostrar dataframes de forma segura."""
+    st.dataframe(sanitize_for_streamlit(df), use_container_width=True, key=key)
+
+def df_to_excel_bytes(dfs: dict) -> bytes:
+    """Dict nombre_hoja -> DataFrame  ->  bytes XLSX (aplico sanitización por seguridad)."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in dfs.items():
+            safe = sanitize_for_streamlit(df)
+            safe.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+    output.seek(0)
+    return output.getvalue()
+
+# =========================
 # SQLite: paths y helpers
 # =========================
 DB_DIR = Path("data")
@@ -218,7 +284,6 @@ def upsert_df_to_db(df: pd.DataFrame):
 # Limpieza y features
 # =========================
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    import re
     df = df.copy()
     df.columns = (
         df.columns.astype(str)
@@ -297,14 +362,6 @@ def load_data(file) -> pd.DataFrame:
         df["PERIODO"] = infer_period(df)
     return df
 
-def df_to_excel_bytes(dfs: dict) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet, data in dfs.items():
-            data.to_excel(writer, index=False, sheet_name=sheet[:31])
-    output.seek(0)
-    return output.getvalue()
-
 # =========================
 # Filtros (incluye EPS)
 # =========================
@@ -381,11 +438,12 @@ def mostrar_kpis(df: pd.DataFrame):
 # Gráficos helpers
 # =========================
 def chart_barras(data: pd.DataFrame, x: str, y: str, label_col: str, color: str|None,
-                 title: str, height: int=460, key_suffix: str = ""):
+                 title: str, height: int=460):
     """Barras horizontales con etiqueta de datos."""
     if data.empty:
         st.info("Sin datos para el gráfico.")
         return
+    data = sanitize_for_streamlit(data)
     if not ALT_AVAILABLE:
         st.bar_chart(data.set_index(y)[x])
         return
@@ -404,8 +462,12 @@ def chart_barras(data: pd.DataFrame, x: str, y: str, label_col: str, color: str|
     st.altair_chart((base + labels).properties(title=title, height=height), use_container_width=True)
 
 def chart_torta(data: pd.DataFrame, cat_col: str, value_col: str, title: str, height:int=420):
-    if data.empty or not ALT_AVAILABLE:
-        st.dataframe(data, use_container_width=True)
+    if data.empty:
+        st.info("Sin datos para el gráfico.")
+        return
+    data = sanitize_for_streamlit(data)
+    if not ALT_AVAILABLE:
+        show_df(data)
         return
     chart = alt.Chart(data).mark_arc(innerRadius=60).encode(
         theta=alt.Theta(f"{value_col}:Q"),
@@ -444,10 +506,10 @@ def vista_por_profesional(df: pd.DataFrame):
                  title="Historias únicas por profesional")
 
     with st.expander("Tabla y descarga"):
-        st.dataframe(res.sort_values("historias", ascending=False), use_container_width=True)
+        show_df(res.sort_values("historias", ascending=False))
         xlsx = df_to_excel_bytes({"Profesionales": res.sort_values("historias", ascending=False)})
         st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="resumen_profesionales.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_prof")
 
     # Pacientes repetidos por profesional
     st.markdown("### 👥 Pacientes repetidos por profesional (más de una atención)")
@@ -458,9 +520,7 @@ def vista_por_profesional(df: pd.DataFrame):
             rep_cols.append("NOMBRE_PROFESIONAL")
         rep_cols.append("CEDULA_PACIENTE")
 
-        agg_rep = {
-            "atenciones": (base_col, "size"),
-        }
+        agg_rep = {"atenciones": (base_col, "size")}
         if "ID ATENCION" in df.columns:
             agg_rep["historias"] = ("ID ATENCION","nunique")
         if "NOMBRE PACIENTE" in df.columns:
@@ -472,11 +532,12 @@ def vista_por_profesional(df: pd.DataFrame):
         if rep.empty:
             st.info("No se encontraron cédulas repetidas por profesional.")
         else:
-            st.dataframe(rep.sort_values("atenciones", ascending=False), use_container_width=True)
+            show_df(rep.sort_values("atenciones", ascending=False), key="tbl_rep_prof")
             xlsx_rep = df_to_excel_bytes({"Pacientes_repetidos": rep.sort_values("atenciones", ascending=False)})
             st.download_button("⬇️ Descargar pacientes repetidos (XLSX)", xlsx_rep,
                                file_name="pacientes_repetidos_por_profesional.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_rep_prof")
     else:
         st.info("No es posible calcular pacientes repetidos (falta CEDULA_PACIENTE o ID_PROFESIONAL).")
 
@@ -500,10 +561,10 @@ def vista_por_especialidad(df: pd.DataFrame):
                  title="Historias únicas por especialidad")
 
     with st.expander("Tabla y descarga"):
-        st.dataframe(res.sort_values("historias", ascending=False), use_container_width=True)
+        show_df(res.sort_values("historias", ascending=False))
         xlsx = df_to_excel_bytes({"Especialidades": res.sort_values("historias", ascending=False)})
         st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="resumen_especialidades.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_esp")
 
 def vista_ciudades_carceles(df: pd.DataFrame):
     if df.empty or "CIUDAD" not in df.columns:
@@ -525,10 +586,10 @@ def vista_ciudades_carceles(df: pd.DataFrame):
                  title="Historias únicas por ciudad y entorno")
 
     with st.expander("Tabla y descarga"):
-        st.dataframe(res.sort_values("historias", ascending=False), use_container_width=True)
+        show_df(res.sort_values("historias", ascending=False))
         xlsx = df_to_excel_bytes({"Ciudades": res.sort_values("historias", ascending=False)})
         st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="resumen_ciudades.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_ciud")
 
 def vista_por_eps(df: pd.DataFrame):
     st.subheader("🏥 Distribución por EPS")
@@ -561,10 +622,10 @@ def vista_por_eps(df: pd.DataFrame):
         chart_torta(tmp, cat_col="EPS", value_col="valor", title="Participación de historias por EPS")
 
     with st.expander("Tabla y descarga"):
-        st.dataframe(grp, use_container_width=True)
+        show_df(grp)
         xlsx = df_to_excel_bytes({"EPS": grp})
         st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="resumen_eps.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_eps")
 
 # =========================
 # Comparativo mensual
@@ -602,16 +663,16 @@ def comparativo_mensual(df: pd.DataFrame):
         plot_df = agg[agg[name_col].isin(sel)] if sel else agg[agg[name_col].isin(default)]
 
         if ALT_AVAILABLE:
-            chart = alt.Chart(plot_df).mark_line(point=True).encode(
+            chart = alt.Chart(sanitize_for_streamlit(plot_df)).mark_line(point=True).encode(
                 x=alt.X("PERIODO:N"), y=alt.Y(f"{met}:Q"),
                 color=f"{name_col}:N", tooltip=list(plot_df.columns)
             ).properties(height=420)
             st.altair_chart(chart, use_container_width=True)
         with st.expander("Tabla y descarga"):
-            st.dataframe(agg.sort_values([name_col,"PERIODO"]), use_container_width=True)
+            show_df(agg.sort_values([name_col,"PERIODO"]))
             xlsx = df_to_excel_bytes({"Comparativo_profesional": agg})
             st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="comparativo_mensual_profesional.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_cmp_prof")
 
     with tab_esp:
         if "ESPECIALIDAD" not in df.columns:
@@ -632,16 +693,16 @@ def comparativo_mensual(df: pd.DataFrame):
         plot_df = agg[agg["ESPECIALIDAD"].isin(sel)] if sel else agg[agg["ESPECIALIDAD"].isin(default)]
 
         if ALT_AVAILABLE:
-            chart = alt.Chart(plot_df).mark_line(point=True).encode(
+            chart = alt.Chart(sanitize_for_streamlit(plot_df)).mark_line(point=True).encode(
                 x=alt.X("PERIODO:N"), y=alt.Y(f"{met}:Q"),
                 color="ESPECIALIDAD:N", tooltip=list(plot_df.columns)
             ).properties(height=420)
             st.altair_chart(chart, use_container_width=True)
         with st.expander("Tabla y descarga"):
-            st.dataframe(agg.sort_values(["ESPECIALIDAD","PERIODO"]), use_container_width=True)
+            show_df(agg.sort_values(["ESPECIALIDAD","PERIODO"]))
             xlsx = df_to_excel_bytes({"Comparativo_especialidad": agg})
             st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="comparativo_mensual_especialidad.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_cmp_esp")
 
 # =========================
 # Tabla dinámica / pivote
@@ -685,7 +746,7 @@ def tabla_dinamica(df: pd.DataFrame):
 
     pt = serie.unstack(columnas) if columnas else serie.to_frame(metrica)
     pt = pt.fillna(0).astype(int, errors="ignore")
-    st.dataframe(pt, use_container_width=True)
+    show_df(pt, key="pvt_table")
 
     xlsx = df_to_excel_bytes({"Tabla_dinamica": pt.reset_index()})
     st.download_button(
@@ -760,7 +821,7 @@ with t6: tabla_dinamica(df_filt)
 
 # ====== Detalle y descarga ======
 st.markdown("### 📋 Detalle filtrado")
-st.dataframe(df_filt, use_container_width=True)
+show_df(df_filt, key="detalle_filtrado")
 xlsx_det = df_to_excel_bytes({"Detalle_filtrado": df_filt})
 st.download_button("⬇️ Descargar detalle filtrado (XLSX)", xlsx_det, file_name="detalle_filtrado.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="btn_dl_detalle")
