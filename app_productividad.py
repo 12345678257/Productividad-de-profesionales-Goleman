@@ -308,39 +308,47 @@ def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     st.sidebar.header("🔎 Filtros")
 
-    # Periodo
+    # Periodo (YYYY-MM)
     if "PERIODO" in df.columns:
         periodos = sorted(df["PERIODO"].dropna().unique().tolist())
-        sel = st.sidebar.multiselect("Periodo (YYYY-MM)", periodos, default=periodos)
-        if sel: df = df[df["PERIODO"].isin(sel)]
-
-    # Rango FECHA ATENCIÓN
-    if "FECHA ATENCIÓN" in df.columns and df["FECHA ATENCIÓN"].notna().any():
-        mi, ma = df["FECHA ATENCIÓN"].min(), df["FECHA ATENCIÓN"].max()
-        fi, ff = st.sidebar.date_input(
-            "Rango de FECHA ATENCIÓN",
-            value=(mi.date(), ma.date()),
-            min_value=mi.date(), max_value=ma.date()
+        per_sel = st.sidebar.multiselect(
+            "Periodo (YYYY-MM)", periodos, default=periodos, key="f_periodo"
         )
-        mask = (df["FECHA ATENCIÓN"].dt.date >= fi) & (df["FECHA ATENCIÓN"].dt.date <= ff)
-        df = df[mask]
+        if per_sel:
+            df = df[df["PERIODO"].isin(per_sel)]
 
-    # Dimensiones
+    # Rango fecha de atención
+    if "FECHA ATENCIÓN" in df.columns and df["FECHA ATENCIÓN"].notna().any():
+        min_date = df["FECHA ATENCIÓN"].min()
+        max_date = df["FECHA ATENCIÓN"].max()
+        fecha_ini, fecha_fin = st.sidebar.date_input(
+            "Rango de FECHA ATENCIÓN",
+            value=(min_date.date(), max_date.date()),
+            min_value=min_date.date(),
+            max_value=max_date.date(),
+            key="f_rango_fecha",
+        )
+        mask_fecha = (df["FECHA ATENCIÓN"].dt.date >= fecha_ini) & (df["FECHA ATENCIÓN"].dt.date <= fecha_fin)
+        df = df[mask_fecha]
+
+    # Otros filtros categóricos (cada uno con key única)
     for col, label in [
         ("EPS", "EPS"),
-        ("SEDE","Sede"),
-        ("PROGRAMA","Programa"),
-        ("CIUDAD","Ciudad"),
-        ("ENTORNO","Entorno"),
-        ("ESPECIALIDAD","Especialidad"),
-        ("NOMBRE_PROFESIONAL","Profesional"),
+        ("SEDE", "Sede"),
+        ("PROGRAMA", "Programa"),
+        ("CIUDAD", "Ciudad"),
+        ("ENTORNO", "Entorno"),
+        ("ESPECIALIDAD", "Especialidad"),
+        ("NOMBRE_PROFESIONAL", "Profesional"),
     ]:
         if col in df.columns:
             vals = sorted([v for v in df[col].dropna().unique().tolist() if str(v).strip() != ""])
-            sel = st.sidebar.multiselect(label, vals)
+            sel = st.sidebar.multiselect(label, vals, key=f"f_{col.lower()}")
             if sel:
                 df = df[df[col].isin(sel)]
+
     return df
+
 
 # =========================
 # KPIs
@@ -410,28 +418,71 @@ def vista_por_profesional(df: pd.DataFrame):
     if df.empty:
         st.warning("No hay datos para esta vista.")
         return
-    group_cols = [c for c in ["ID_PROFESIONAL","NOMBRE_PROFESIONAL","ESPECIALIDAD","ENTORNO"] if c in df.columns]
+
+    group_cols = []
+    if "ID_PROFESIONAL" in df.columns:
+        group_cols.append("ID_PROFESIONAL")
+    if "NOMBRE_PROFESIONAL" in df.columns:
+        group_cols.append("NOMBRE_PROFESIONAL")
+    if "ESPECIALIDAD" in df.columns:
+        group_cols.append("ESPECIALIDAD")
+    if "ENTORNO" in df.columns:
+        group_cols.append("ENTORNO")
+
     if not group_cols:
-        st.info("No se encontraron columnas de profesional.")
+        st.warning("No se encontraron columnas de profesional para agrupar.")
         return
-    agg = {
-        "historias": ("ID ATENCION","nunique") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-        "atenciones": ("ID ATENCION","size") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-        "pacientes_unicos": ("CEDULA_PACIENTE","nunique")
-    }
-    res = df.groupby(group_cols, dropna=False).agg(**agg).reset_index()
-    res["lbl"] = res.apply(lambda r: f"H: {int(r['historias'])} | P: {int(r['pacientes_unicos'])}", axis=1)
-    top_n = st.slider("Top profesionales por historias", 5, 50, 20)
-    top = res.sort_values("historias", ascending=False).head(top_n)
-    y_col = "NOMBRE_PROFESIONAL" if "NOMBRE_PROFESIONAL" in top.columns else group_cols[0]
-    chart_barras(top, x="historias", y=y_col, label_col="lbl",
-                 color="ENTORNO" if "ENTORNO" in top.columns else None,
-                 title="Historias únicas por profesional")
+
+    agg_dict = {}
+    if "ID ATENCION" in df.columns:
+        agg_dict["historias"] = ("ID ATENCION", "nunique")
+        agg_dict["atenciones"] = ("ID ATENCION", "size")
+    else:
+        agg_dict["historias"] = ("CEDULA_PACIENTE", "size")
+        agg_dict["atenciones"] = ("CEDULA_PACIENTE", "size")
+
+    if "CEDULA_PACIENTE" in df.columns:
+        agg_dict["pacientes_unicos"] = ("CEDULA_PACIENTE", "nunique")
+
+    resumen = df.groupby(group_cols, dropna=False).agg(**agg_dict).reset_index()
+
+    top_n = st.slider("Top profesionales por historias", 5, 50, 20, key="sl_top_prof")
+    resumen_top = resumen.sort_values("historias", ascending=False).head(top_n)
+
+    if "pacientes_unicos" in resumen_top.columns:
+        resumen_top["lbl_hist_pac"] = resumen_top.apply(
+            lambda r: f"H: {int(r['historias'])} | P: {int(r['pacientes_unicos'])}",
+            axis=1,
+        )
+    else:
+        resumen_top["lbl_hist_pac"] = resumen_top["historias"].astype(int).astype(str)
+
+    st.subheader("🏆 Ranking por profesional")
+
+    y_col = "NOMBRE_PROFESIONAL" if "NOMBRE_PROFESIONAL" in resumen_top.columns else group_cols[0]
+
+    chart_bar_with_labels(
+        resumen_top,
+        x="historias",
+        y=y_col,
+        label_col="lbl_hist_pac",
+        color="ENTORNO" if "ENTORNO" in resumen_top.columns else None,
+        title="Historias únicas por profesional",
+    )
+
     with st.expander("Tabla y descarga"):
-        st.dataframe(res.sort_values("historias", ascending=False), use_container_width=True)
-        xlsx = df_to_excel_bytes({"Profesionales": res.sort_values("historias", ascending=False)})
-        st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="resumen_profesionales.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.dataframe(
+            resumen.sort_values("historias", ascending=False),
+            use_container_width=True,
+        )
+        xlsx = df_to_excel_bytes({"Profesionales": resumen.sort_values("historias", ascending=False)})
+        st.download_button(
+            "⬇️ Descargar resumen por profesional (XLSX)",
+            xlsx,
+            file_name="resumen_productividad_profesional.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 
 def vista_por_especialidad(df: pd.DataFrame):
     if df.empty or "ESPECIALIDAD" not in df.columns:
@@ -520,75 +571,144 @@ def vista_por_eps(df: pd.DataFrame):
 # Comparativo mensual
 # =========================
 def comparativo_mensual(df: pd.DataFrame):
-    st.subheader("📆 Comparativo mensual")
     if df.empty or "PERIODO" not in df.columns:
-        st.info("No hay PERIODO para comparar.")
+        st.info("No hay datos con PERIODO para comparar.")
         return
 
-    tab1, tab2 = st.tabs(["👨‍⚕️ Por profesional", "🩺 Por especialidad"])
+    st.subheader("📆 Comparativo mensual")
 
-    with tab1:
-        cols = ["PERIODO"]
+    tab_prof, tab_esp = st.tabs(
+        ["👨‍⚕️ Por profesional (mensual)", "🩺 Por especialidad (mensual)"]
+    )
+
+    with tab_prof:
+        group_cols = ["PERIODO"]
         if "NOMBRE_PROFESIONAL" in df.columns:
-            cols += ["NOMBRE_PROFESIONAL"]; name_col = "NOMBRE_PROFESIONAL"
+            group_cols.append("NOMBRE_PROFESIONAL")
+            nombre_col = "NOMBRE_PROFESIONAL"
         elif "ID_PROFESIONAL" in df.columns:
-            cols += ["ID_PROFESIONAL"]; name_col = "ID_PROFESIONAL"
+            group_cols.append("ID_PROFESIONAL")
+            nombre_col = "ID_PROFESIONAL"
         else:
-            st.info("Falta columna de profesional.")
-            st.stop()
-
-        agg = df.groupby(cols, dropna=False).agg(
-            historias=("ID ATENCION","nunique") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-            atenciones=("ID ATENCION","size") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-            pacientes_unicos=("CEDULA_PACIENTE","nunique") if "CEDULA_PACIENTE" in df.columns else ("ID ATENCION","nunique")
-        ).reset_index()
-        ult = agg["PERIODO"].max()
-        topUlt = agg[agg["PERIODO"]==ult].sort_values("historias", ascending=False).head(10)
-        opciones = sorted(agg[name_col].dropna().unique().tolist())
-        default = topUlt[name_col].tolist()
-        sel = st.multiselect("Profesionales a comparar", opciones, default=default)
-        met = st.selectbox("Métrica", ["historias","pacientes_unicos","atenciones"], index=0)
-
-        plot_df = agg[agg[name_col].isin(sel)] if sel else agg[agg[name_col].isin(default)]
-        if ALT_AVAILABLE:
-            chart = alt.Chart(plot_df).mark_line(point=True).encode(
-                x=alt.X("PERIODO:N"), y=alt.Y(f"{met}:Q"),
-                color=f"{name_col}:N", tooltip=list(plot_df.columns)
-            ).properties(height=420)
-            st.altair_chart(chart, use_container_width=True)
-        with st.expander("Tabla y descarga"):
-            st.dataframe(agg.sort_values([name_col,"PERIODO"]), use_container_width=True)
-            xlsx = df_to_excel_bytes({"Comparativo_profesional": agg})
-            st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="comparativo_mensual_profesional.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    with tab2:
-        if "ESPECIALIDAD" not in df.columns:
-            st.info("Falta ESPECIALIDAD.")
+            st.info("No hay columnas de profesional para comparar por mes.")
             return
-        agg = df.groupby(["PERIODO","ESPECIALIDAD"], dropna=False).agg(
-            historias=("ID ATENCION","nunique") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-            atenciones=("ID ATENCION","size") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE","size"),
-            pacientes_unicos=("CEDULA_PACIENTE","nunique") if "CEDULA_PACIENTE" in df.columns else ("ID ATENCION","nunique")
-        ).reset_index()
+
+        agg = (
+            df.groupby(group_cols, dropna=False)
+            .agg(
+                historias=("ID ATENCION", "nunique") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE", "size"),
+                atenciones=("ID ATENCION", "size") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE", "size"),
+                pacientes_unicos=("CEDULA_PACIENTE", "nunique") if "CEDULA_PACIENTE" in df.columns else ("ID ATENCION", "nunique"),
+            )
+            .reset_index()
+        )
+
         ult = agg["PERIODO"].max()
-        topUlt = agg[agg["PERIODO"]==ult].sort_values("historias", ascending=False).head(10)
-        opciones = sorted(agg["ESPECIALIDAD"].dropna().unique().tolist())
-        default = topUlt["ESPECIALIDAD"].tolist()
-        sel = st.multiselect("Especialidades a comparar", opciones, default=default)
-        met = st.selectbox("Métrica (especialidad)", ["historias","pacientes_unicos","atenciones"], index=0, key="met_esp")
-        plot_df = agg[agg["ESPECIALIDAD"].isin(sel)] if sel else agg[agg["ESPECIALIDAD"].isin(default)]
+        top_ult = (
+            agg[agg["PERIODO"] == ult]
+            .sort_values("historias", ascending=False)
+            .head(10)
+        )
+        nombres = sorted(agg[nombre_col].dropna().unique().tolist())
+        default_sel = top_ult[nombre_col].tolist()
+
+        sel_prof = st.multiselect("Profesionales a comparar", nombres, default=default_sel, key="cmp_prof_sel")
+        metrica = st.selectbox("Métrica", ["historias", "pacientes_unicos", "atenciones"], index=0, key="cmp_prof_metric")
+
+        if sel_prof:
+            plot_df = agg[agg[nombre_col].isin(sel_prof)].copy()
+        else:
+            plot_df = agg[agg[nombre_col].isin(default_sel)].copy()
+
         if ALT_AVAILABLE:
-            chart = alt.Chart(plot_df).mark_line(point=True).encode(
-                x=alt.X("PERIODO:N"), y=alt.Y(f"{met}:Q"),
-                color="ESPECIALIDAD:N", tooltip=list(plot_df.columns)
-            ).properties(height=420)
+            chart = (
+                alt.Chart(plot_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("PERIODO:N"),
+                    y=alt.Y(f"{metrica}:Q"),
+                    color=f"{nombre_col}:N",
+                    tooltip=list(plot_df.columns),
+                )
+                .properties(height=420)
+            )
             st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Instala 'altair' para ver los gráficos de línea. Se muestra solo tabla.")
+
         with st.expander("Tabla y descarga"):
-            st.dataframe(agg.sort_values(["ESPECIALIDAD","PERIODO"]), use_container_width=True)
+            st.dataframe(agg.sort_values([nombre_col, "PERIODO"]), use_container_width=True)
+            xlsx = df_to_excel_bytes({"Comparativo_profesional": agg})
+            st.download_button(
+                "⬇️ Descargar comparativo mensual por profesional (XLSX)",
+                xlsx,
+                file_name="comparativo_mensual_profesional.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    with tab_esp:
+        if "ESPECIALIDAD" not in df.columns:
+            st.info("No existe ESPECIALIDAD para comparar.")
+            return
+
+        agg = (
+            df.groupby(["PERIODO", "ESPECIALIDAD"], dropna=False)
+            .agg(
+                historias=("ID ATENCION", "nunique") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE", "size"),
+                atenciones=("ID ATENCION", "size") if "ID ATENCION" in df.columns else ("CEDULA_PACIENTE", "size"),
+                pacientes_unicos=("CEDULA_PACIENTE", "nunique") if "CEDULA_PACIENTE" in df.columns else ("ID ATENCION", "nunique"),
+            )
+            .reset_index()
+        )
+
+        ult = agg["PERIODO"].max()
+        top_ult = (
+            agg[agg["PERIODO"] == ult]
+            .sort_values("historias", ascending=False)
+            .head(10)
+        )
+        especialidades = sorted(agg["ESPECIALIDAD"].dropna().unique().tolist())
+        default_sel = top_ult["ESPECIALIDAD"].tolist()
+
+        sel_esp = st.multiselect("Especialidades a comparar", especialidades, default=default_sel, key="cmp_esp_sel")
+        metrica_esp = st.selectbox(
+            "Métrica (especialidad)",
+            ["historias", "pacientes_unicos", "atenciones"],
+            index=0,
+            key="met_esp",
+        )
+
+        if sel_esp:
+            plot_df = agg[agg["ESPECIALIDAD"].isin(sel_esp)].copy()
+        else:
+            plot_df = agg[agg["ESPECIALIDAD"].isin(default_sel)].copy()
+
+        if ALT_AVAILABLE:
+            chart = (
+                alt.Chart(plot_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("PERIODO:N"),
+                    y=alt.Y(f"{metrica_esp}:Q"),
+                    color="ESPECIALIDAD:N",
+                    tooltip=list(plot_df.columns),
+                )
+                .properties(height=420)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Instala 'altair' para ver los gráficos de línea. Se muestra solo tabla.")
+
+        with st.expander("Tabla y descarga"):
+            st.dataframe(agg.sort_values(["ESPECIALIDAD", "PERIODO"]), use_container_width=True)
             xlsx = df_to_excel_bytes({"Comparativo_especialidad": agg})
-            st.download_button("⬇️ Descargar (XLSX)", xlsx, file_name="comparativo_mensual_especialidad.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "⬇️ Descargar comparativo mensual por especialidad (XLSX)",
+                xlsx,
+                file_name="comparativo_mensual_especialidad.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
 
 # =========================
 # Tablas dinámicas / pivote
@@ -599,18 +719,31 @@ def tabla_dinamica(df: pd.DataFrame):
     if not cols_dim:
         st.info("No hay columnas para pivotear.")
         return
+
     c1, c2, c3 = st.columns(3)
-    filas = c1.multiselect("Filas", cols_dim, default=["ESPECIALIDAD"] if "ESPECIALIDAD" in cols_dim else [cols_dim[0]])
-    columnas = c2.multiselect("Columnas (opcional)", cols_dim, default=["EPS"] if "EPS" in cols_dim else [])
-    metrica = c3.selectbox("Métrica", ["historias","pacientes_unicos","atenciones"], index=0)
+    filas = c1.multiselect(
+        "Filas", cols_dim,
+        default=["ESPECIALIDAD"] if "ESPECIALIDAD" in cols_dim else [cols_dim[0]],
+        key="pvt_rows"
+    )
+    columnas = c2.multiselect(
+        "Columnas (opcional)", cols_dim,
+        default=["EPS"] if "EPS" in cols_dim else [],
+        key="pvt_cols"
+    )
+    metrica = c3.selectbox(
+        "Métrica", ["historias","pacientes_unicos","atenciones"], index=0, key="pvt_metric"
+    )
 
     if not filas:
         st.info("Selecciona al menos una dimensión para Filas.")
         return
 
-    # Construimos serie agregada
+    # Construir serie agregada
     if metrica == "historias":
-        serie = df.groupby(filas + columnas, dropna=False)["ID ATENCION"].nunique() if "ID ATENCION" in df.columns else df.groupby(filas+columnas, dropna=False)["CEDULA_PACIENTE"].size()
+        serie = df.groupby(filas + columnas, dropna=False)["ID ATENCION"].nunique() \
+                 if "ID ATENCION" in df.columns \
+                 else df.groupby(filas + columnas, dropna=False)["CEDULA_PACIENTE"].size()
     elif metrica == "pacientes_unicos":
         serie = df.groupby(filas + columnas, dropna=False)["CEDULA_PACIENTE"].nunique()
     else:  # atenciones
@@ -622,8 +755,14 @@ def tabla_dinamica(df: pd.DataFrame):
     st.dataframe(pt, use_container_width=True)
 
     xlsx = df_to_excel_bytes({"Tabla_dinamica": pt.reset_index()})
-    st.download_button("⬇️ Descargar tabla dinámica (XLSX)", xlsx, file_name="tabla_dinamica.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "⬇️ Descargar tabla dinámica (XLSX)",
+        xlsx,
+        file_name="tabla_dinamica.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="pvt_dl_btn"
+    )
+
 
 # =========================
 # MAIN
@@ -683,3 +822,4 @@ st.dataframe(df_filt, use_container_width=True)
 xlsx_det = df_to_excel_bytes({"Detalle_filtrado": df_filt})
 st.download_button("⬇️ Descargar detalle filtrado (XLSX)", xlsx_det, file_name="detalle_filtrado.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
